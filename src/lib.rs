@@ -5,7 +5,7 @@
 
 use era::{DecryptReader, EncryptWriter, EraArchive, EraWriter, TeaKeys};
 use sevenzip_plugin::prelude::*;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 
 /// ERA archive format handler.
 ///
@@ -81,14 +81,20 @@ impl ArchiveFormat for EraFormat {
 // =============================================================================
 
 impl ArchiveReader for EraFormat {
-    fn open(&mut self, data: &[u8]) -> Result<()> {
-        self.archive_size = data.len() as u64;
+    fn open(&mut self, reader: &mut dyn ReadSeek, size: u64) -> Result<()> {
+        self.archive_size = size;
+
+        // Read all data into memory (ERA needs full access for decryption)
+        let mut data = Vec::with_capacity(size as usize);
+        reader
+            .read_to_end(&mut data)
+            .map_err(|e| Error::Io(format!("Failed to read archive: {}", e)))?;
 
         // Store raw data for editing operations
-        self.archive_data = Some(data.to_vec());
+        self.archive_data = Some(data.clone());
 
         // Decrypt and parse the ERA archive
-        let cursor = Cursor::new(data.to_vec());
+        let cursor = Cursor::new(data);
         let decrypt_reader = DecryptReader::new(cursor, TeaKeys::default_archive_keys());
 
         let archive = EraArchive::new(decrypt_reader)
@@ -162,17 +168,18 @@ impl ArchiveReader for EraFormat {
 // =============================================================================
 
 impl ArchiveUpdater for EraFormat {
-    fn update(&mut self, existing_data: &[u8], updates: Vec<UpdateItem>) -> Result<Vec<u8>> {
+    fn update_streaming(
+        &mut self,
+        _existing: &mut dyn ReadSeek,
+        _existing_size: u64,
+        updates: Vec<UpdateItem>,
+        writer: &mut dyn Write,
+    ) -> Result<u64> {
         // Create a new ERA writer
         let mut era_writer = EraWriter::new();
 
-        // Re-parse the existing archive for reading entries
-        let cursor = Cursor::new(existing_data.to_vec());
-        let decrypt_reader = DecryptReader::new(cursor, TeaKeys::default_archive_keys());
-        let mut source_archive = EraArchive::new(decrypt_reader)
-            .map_err(|e| Error::InvalidFormat(format!("Failed to parse source ERA: {:?}", e)))?;
-
         // Process each update operation
+        // Use self.archive which was already parsed during open()
         for update in updates {
             match update {
                 UpdateItem::CopyExisting { index, new_name } => {
@@ -186,9 +193,15 @@ impl ArchiveUpdater for EraFormat {
                         })?
                         .era_index;
 
-                    // Read the entry data
-                    let data = source_archive
-                        .read_entry(era_index)
+                    // Read the COMPRESSED entry data from our already-parsed archive
+                    // This avoids decompression and recompression overhead
+                    let archive = self
+                        .archive
+                        .as_mut()
+                        .ok_or_else(|| Error::Other("Archive not open".into()))?;
+
+                    let (compressed_data, decomp_size, tiger128) = archive
+                        .read_entry_compressed(era_index)
                         .map_err(|e| Error::Other(format!("Failed to read entry: {:?}", e)))?;
 
                     // Get the filename (use new_name if provided, otherwise original)
@@ -199,15 +212,22 @@ impl ArchiveUpdater for EraFormat {
                             .unwrap_or_else(|| format!("entry_{}", era_index))
                     });
 
-                    era_writer.add_file(&filename, data);
+                    // Add pre-compressed file to skip recompression
+                    era_writer.add_compressed_file(
+                        &filename,
+                        compressed_data,
+                        decomp_size,
+                        tiger128,
+                    );
                 }
                 UpdateItem::AddNew { name, data } => {
+                    // New files need to be compressed (uses parallel compression via rayon)
                     era_writer.add_file(&name, data);
                 }
             }
         }
 
-        // Write the new ERA archive
+        // Write the new ERA archive to a buffer first (EncryptWriter needs owned writer)
         let mut buffer = Cursor::new(Vec::new());
         let keys = TeaKeys::default_archive_keys();
         let encrypt_writer = EncryptWriter::new(&mut buffer, keys);
@@ -216,7 +236,15 @@ impl ArchiveUpdater for EraFormat {
             .write(encrypt_writer)
             .map_err(|e| Error::Other(format!("Failed to write ERA: {}", e)))?;
 
-        Ok(buffer.into_inner())
+        // Write the buffer to the output
+        let output_data = buffer.into_inner();
+        let len = output_data.len() as u64;
+
+        writer
+            .write_all(&output_data)
+            .map_err(|e| Error::Io(format!("Failed to write output: {}", e)))?;
+
+        Ok(len)
     }
 }
 
