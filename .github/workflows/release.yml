@@ -15,6 +15,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Configure git for private repos
+        run: git config --global url."https://${{ github.token }}@github.com/".insteadOf "https://github.com/"
+
       - name: Generate tag
         id: tag
         run: |
