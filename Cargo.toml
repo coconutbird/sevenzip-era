@@ -1,0 +1,12 @@
+[package]
+name = "sevenzip-era"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "era"
+crate-type = ["cdylib"]
+
+[dependencies]
+sevenzip-plugin = { git = "https://github.com/coconutbird/sevenzip-plugin" }
+era = { git = "https://github.com/coconutbird/ensemble-rs", package = "era" }
