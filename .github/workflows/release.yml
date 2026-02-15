@@ -6,6 +6,9 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
 jobs:
   release:
     runs-on: windows-latest
