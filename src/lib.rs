@@ -174,6 +174,7 @@ impl ArchiveUpdater for EraFormat {
         _existing_size: u64,
         updates: Vec<UpdateItem>,
         writer: &mut dyn Write,
+        progress: Option<&mut dyn FnMut(u64, u64) -> bool>,
     ) -> Result<u64> {
         // Create a new ERA writer
         let mut era_writer = EraWriter::new();
@@ -221,7 +222,7 @@ impl ArchiveUpdater for EraFormat {
                     );
                 }
                 UpdateItem::AddNew { name, data } => {
-                    // New files need to be compressed (uses parallel compression via rayon)
+                    // New files will be compressed during write phase
                     era_writer.add_file(&name, data);
                 }
             }
@@ -232,8 +233,9 @@ impl ArchiveUpdater for EraFormat {
         let keys = TeaKeys::default_archive_keys();
         let encrypt_writer = EncryptWriter::new(&mut buffer, keys);
 
+        // Use write_with_progress to report progress during the write phase
         era_writer
-            .write(encrypt_writer)
+            .write_with_progress(encrypt_writer, progress)
             .map_err(|e| Error::Other(format!("Failed to write ERA: {}", e)))?;
 
         // Write the buffer to the output
